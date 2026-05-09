@@ -1,0 +1,437 @@
+{
+  "version": "1.4",
+  "updated": "2026-05-02T00:00:00Z",
+  "updatedBy": "Partner B",
+  "nodes": [
+    {
+      "id": "tryon-page",
+      "type": "route",
+      "path": "app/try-on/page.tsx",
+      "role": "Client page. Owns camera/upload/model source, layer state, gated flow state machine (idle\u2192scanning\u2192curating\u2192showingProfile\u2192playing), render loop, scan trigger, profile wiring. 2026-04-23: scan is now user-initiated via ScanCTA; all layers default to active=false; MediaPipe confidence thresholds lowered to 0.3; model-mode contour rewritten to match engine v3.",
+      "size": "~2.6k lines (nails path removed, ScanCTA + SVG source-tabs added)",
+      "exports": [
+        "default TryOnPage"
+      ],
+      "touches": [
+        "tryon-engine",
+        "face-scan-overlay",
+        "profile-card",
+        "globals-css",
+        "category-icon",
+        "preview-stage",
+        "controls-panel",
+        "source-selector",
+        "layer-detail",
+        "curating-overlay",
+        "scan-cta"
+      ],
+      "internalSubcomponents": [
+        "StyleChips<T>",
+        "CategoryIcon",
+        "PreviewStage",
+        "SourceSelector",
+        "LayerDetail",
+        "ControlsPanel",
+        "CuratingOverlay",
+        "ScanCTA"
+      ],
+      "splitStatus": "boundaries-only \u2014 extraction into separate modules pending",
+      "flowStates": [
+        "idle",
+        "scanning",
+        "curating",
+        "showingProfile",
+        "playing"
+      ],
+      "removed": [
+        "Hands MediaPipe load path",
+        "renderNails invocation",
+        "nailFinish field",
+        "handsRef",
+        "latestHands",
+        "scan auto-trigger on first face lock",
+        "pre-applied lipstick default"
+      ]
+    },
+    {
+      "id": "category-icon",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Inline SVG renderer for try-on categories. Nails icon still shipped for the Coming Soon chip. currentColor-driven.",
+      "props": [
+        "cat"
+      ],
+      "touches": [
+        "globals-css"
+      ]
+    },
+    {
+      "id": "scan-cta",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Floating call-to-action over the preview stage. Visible when flowStage === 'idle' && faceDetected && source !== 'model'. On tap calls startScan() which sets flowStage='scanning'.",
+      "props": [
+        "onStart"
+      ],
+      "touches": [
+        "globals-css"
+      ]
+    },
+    {
+      "id": "curating-overlay",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Gated-flow waiting screen shown between FaceScan completion and ProfileCard reveal. Rotates three messages on a 600ms cadence over a conic-gradient orb.",
+      "touches": [
+        "globals-css"
+      ]
+    },
+    {
+      "id": "preview-stage",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Wrapper boundary for the left-hand preview area (video/img/canvas + FaceScanOverlay + CuratingOverlay + actionbar).",
+      "splitStatus": "boundary-only"
+    },
+    {
+      "id": "controls-panel",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Wrapper boundary for the right-hand controls column. Dimmed by .tryon-gated / .tryon-dimmed classes during scan+curating+showingProfile.",
+      "splitStatus": "boundary-only"
+    },
+    {
+      "id": "source-selector",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Wrapper boundary for the camera/upload/model source picker + model carousel.",
+      "splitStatus": "boundary-only"
+    },
+    {
+      "id": "layer-detail",
+      "type": "component",
+      "path": "app/try-on/page.tsx",
+      "role": "Wrapper boundary for the per-layer editor (toggle, product select, shade grid, intensity, StyleChips, add-to-cart). Nails StyleChips block removed.",
+      "splitStatus": "boundary-only"
+    },
+    {
+      "id": "tryon-engine",
+      "type": "lib",
+      "path": "lib/tryon-engine.ts",
+      "role": "Pure render + analysis. FaceMesh landmark math, compositing, face profile detection. renderNails still exported but not wired.",
+      "exports": [
+        "renderLipstick",
+        "renderLipgloss (jointlyOwned \u2014 radial-specular rewrite 2026-04-23)",
+        "renderBlush",
+        "renderContour (jointlyOwned \u2014 v4 2026-04-23 afternoon: FACE_OVAL clip + toContourHex + shadow/definition split + cheekbone>jaw weighting + intensity-gated warm highlights)",
+        "renderEyeliner (jointlyOwned \u2014 v4 2026-04-23 afternoon: adaptive EMA + blink gate via eyeAperture + clamped tightline + localUp-blended wing)",
+        "renderEyeshadow",
+        "renderNails (unwired)",
+        "toContourHex (new \u2014 shade hex \u2192 believable contour shadow)",
+        "detectSkinTone",
+        "detectUndertone",
+        "detectFaceShape",
+        "FaceProfile",
+        "FaceShape",
+        "SkinDepth",
+        "Undertone"
+      ],
+      "privateHelpers": [
+        "FACE_OVAL (37-index FaceMesh ring for contour clip \u2014 new 2026-04-23 v4)",
+        "smoothLidPoint (adaptive EMA alpha per lid point \u2014 2026-04-23 v4)",
+        "eyeAperture (vertical/horizontal ratio, blink gate \u2014 new 2026-04-23 v4)"
+      ],
+      "constants": [
+        "EYELINER_L (inner\u2192outer)",
+        "EYELINER_R (inner\u2192outer)",
+        "LOWER_LINE_L",
+        "LOWER_LINE_R",
+        "CONTOUR_CHEEKBONE_L (zygomatic arch \u2014 new 2026-04-23)",
+        "CONTOUR_CHEEKBONE_R (zygomatic arch \u2014 new 2026-04-23)",
+        "CONTOUR_TEMPLE_L (alias of CHEEKBONE, back-compat)",
+        "CONTOUR_TEMPLE_R (alias of CHEEKBONE, back-compat)",
+        "CONTOUR_JAW_L",
+        "CONTOUR_JAW_R",
+        "LIP_OUTER",
+        "LIP_INNER",
+        "LIP_LOWER_OUTER",
+        "LIP_LOWER_INNER",
+        "LIP_UPPER_OUTER",
+        "LIP_UPPER_INNER"
+      ]
+    },
+    {
+      "id": "face-scan-overlay",
+      "type": "component",
+      "path": "app/try-on/_components/FaceScanOverlay.tsx",
+      "role": "3-stage scan intro. detect(800ms) \u2192 analyze(1000ms) \u2192 match(800ms). Emits onComplete which hands off to the curating stage.",
+      "props": [
+        "visible",
+        "onComplete"
+      ],
+      "touches": [
+        "globals-css"
+      ]
+    },
+    {
+      "id": "profile-card",
+      "type": "component",
+      "path": "app/try-on/_components/ProfileCard.tsx",
+      "role": "Summary tags + top-3 recs + Apply All. Rendered as a hero above the try-on grid in the showingProfile flow stage.",
+      "exports": [
+        "ProfileCard",
+        "buildRecommendations",
+        "Recommendation"
+      ],
+      "scoring": "tone +3, undertone proxy +2, everyday +1, halal +1. Nails recommendations filtered out at the call site in page.tsx.",
+      "touches": [
+        "tryon-engine",
+        "globals-css"
+      ]
+    },
+    {
+      "id": "globals-css",
+      "type": "style",
+      "path": "styles/globals.css",
+      "role": "Scan overlay + profile card + rec rows + Apply All button + coming-soon chips + curating overlay + gated-flow control panel states + ScanCTA pill + responsive mobile/tablet media queries (900px + 640px) + sticky control panel + icon-tab source selector + sticky bottom action bar with safe-area insets."
+    },
+    {
+      "id": "face-profile",
+      "type": "type",
+      "path": "lib/tryon-engine.ts",
+      "role": "{ tone: SkinDepth, undertone: Undertone, shape: FaceShape }"
+    },
+    {
+      "id": "recommendations",
+      "type": "logic",
+      "path": "app/try-on/_components/ProfileCard.tsx",
+      "role": "Deterministic top-3. SHAPE_NUDGE weights categories by face shape. Nails category is filtered in page.tsx before apply.",
+      "inputs": [
+        "FaceProfile"
+      ],
+      "outputs": [
+        "Recommendation[3]"
+      ]
+    },
+    {
+      "id": "sync-docs",
+      "type": "docs",
+      "path": "docs/ai-sync/",
+      "role": "Cursor\u2194Claude coordination. PLAN, TASKS, DECISIONS, HANDOFF, CAVEMEN_NOTES, GRAPH.",
+      "files": [
+        "PLAN.md",
+        "TASKS.md",
+        "DECISIONS.md",
+        "HANDOFF.md",
+        "CAVEMEN_NOTES.md",
+        "GRAPH.json",
+        "CONTEXT.md"
+      ]
+    },
+    {
+      "id": "design-system",
+      "type": "docs",
+      "path": "design-system/",
+      "role": "UI/UX source of truth. Generated 2026-04-23 via /ui-ux-pro-max. Base style: Soft UI Evolution (perf-excellent, WCAG AA+). Accent: Liquid Glass (hero chrome + modal backdrop only, behind @supports + reduced-motion guard). MASTER holds tokens (colour, type, 4-pt spacing, motion, breakpoints 320\u20131536) + global UX rules + ethics + Core Web Vitals budget. Per-page overrides and a 10-phase upgrade plan sit alongside.",
+      "files": [
+        "MASTER.md",
+        "pages/home.md",
+        "pages/shop.md",
+        "pages/product.md",
+        "pages/try-on.md",
+        "pages/cart.md",
+        "pages/checkout.md",
+        "UI_UX_UPGRADE_PLAN.md",
+        "LAUNCH_CHECKLIST.md"
+      ]
+    },
+    {
+      "id": "fix-eyeshadow-blend-mode",
+      "type": "decision",
+      "label": "EyeshadowBlendModeFix",
+      "description": "renderEyeshadow lid/crease/outer-V changed from multiply to source-over. multiply is invisible on non-white skin; source-over with alpha 0.28-0.40 renders correctly.",
+      "created_by": "Partner B",
+      "created_at": "2026-05-02T00:00:00Z"
+    },
+    {
+      "id": "fix-isstripevisible-threshold",
+      "type": "decision",
+      "label": "isStripeVisibleThresholdFix",
+      "description": "isStripeVisible default threshold 0.08 gates out eyelid landmarks on static photos with slight face pitch. Raised to 0.15 for EYESHADOW_L/R_LID and EYELINER_L/R. The 0.08 value is correct for live camera head-turn rejection only.",
+      "created_by": "Partner B",
+      "created_at": "2026-05-02T00:00:00Z"
+    }
+  ],
+  "edges": [
+    {
+      "from": "tryon-page",
+      "to": "tryon-engine",
+      "kind": "imports",
+      "note": "render*, detectSkinTone, detectUndertone, detectFaceShape"
+    },
+    {
+      "from": "tryon-page",
+      "to": "face-scan-overlay",
+      "kind": "renders",
+      "note": "flowStage === 'scanning'"
+    },
+    {
+      "from": "tryon-page",
+      "to": "curating-overlay",
+      "kind": "renders",
+      "note": "flowStage === 'curating'"
+    },
+    {
+      "from": "tryon-page",
+      "to": "scan-cta",
+      "kind": "renders",
+      "note": "flowStage === 'idle' && faceDetected && source !== 'model'"
+    },
+    {
+      "from": "scan-cta",
+      "to": "globals-css",
+      "kind": "styles",
+      "note": ".tryon-scan-cta*"
+    },
+    {
+      "from": "tryon-page",
+      "to": "profile-card",
+      "kind": "renders",
+      "note": "flowStage === 'showingProfile', hero slot above grid"
+    },
+    {
+      "from": "tryon-page",
+      "to": "globals-css",
+      "kind": "styles"
+    },
+    {
+      "from": "tryon-page",
+      "to": "category-icon",
+      "kind": "renders",
+      "note": "layer chips + coming-soon chips + active-layer header"
+    },
+    {
+      "from": "tryon-page",
+      "to": "preview-stage",
+      "kind": "contains"
+    },
+    {
+      "from": "tryon-page",
+      "to": "controls-panel",
+      "kind": "contains"
+    },
+    {
+      "from": "controls-panel",
+      "to": "source-selector",
+      "kind": "contains"
+    },
+    {
+      "from": "controls-panel",
+      "to": "layer-detail",
+      "kind": "contains"
+    },
+    {
+      "from": "category-icon",
+      "to": "globals-css",
+      "kind": "styles",
+      "note": ".tryon-layer-icon SVG sizing/fill"
+    },
+    {
+      "from": "curating-overlay",
+      "to": "globals-css",
+      "kind": "styles",
+      "note": ".tryon-curating*"
+    },
+    {
+      "from": "face-scan-overlay",
+      "to": "globals-css",
+      "kind": "styles"
+    },
+    {
+      "from": "profile-card",
+      "to": "globals-css",
+      "kind": "styles"
+    },
+    {
+      "from": "profile-card",
+      "to": "tryon-engine",
+      "kind": "imports",
+      "note": "FaceProfile type"
+    },
+    {
+      "from": "profile-card",
+      "to": "recommendations",
+      "kind": "contains"
+    },
+    {
+      "from": "recommendations",
+      "to": "face-profile",
+      "kind": "consumes"
+    },
+    {
+      "from": "tryon-engine",
+      "to": "face-profile",
+      "kind": "exports"
+    },
+    {
+      "from": "sync-docs",
+      "to": "tryon-page",
+      "kind": "references"
+    },
+    {
+      "from": "sync-docs",
+      "to": "tryon-engine",
+      "kind": "references"
+    },
+    {
+      "from": "design-system",
+      "to": "tryon-page",
+      "kind": "governs",
+      "note": "try-on.md page override"
+    },
+    {
+      "from": "design-system",
+      "to": "globals-css",
+      "kind": "governs",
+      "note": "tokens in MASTER \u00a72.4 become CSS vars in Phase 0"
+    },
+    {
+      "from": "fix-eyeshadow-blend-mode",
+      "to": "fix-isstripevisible-threshold",
+      "relation": "relates_to",
+      "note": "Both caused eyeshadow/eyeliner to be invisible on real uploaded photos; found and fixed in same session"
+    }
+  ],
+  "ownership": {
+    "partnerA_cursor": [
+      "globals-css (typography/spacing polish + gated-flow states + curating styles)",
+      "tryon-page (subcomponent split, drag-drop upload, flow state machine, coming-soon UI)",
+      "category-icon",
+      "curating-overlay",
+      "scan-cta",
+      "preview-stage",
+      "controls-panel",
+      "source-selector",
+      "layer-detail"
+    ],
+    "partnerB_claude": [
+      "tryon-engine (landmark indices, gradient polarity, detection math)",
+      "face-scan-overlay",
+      "profile-card",
+      "recommendations"
+    ],
+    "jointlyOwned": [
+      "tryon-engine::renderLipgloss \u2014 radial specular rewrite by Partner A on 2026-04-23 per user report",
+      "tryon-engine::renderEyeliner \u2014 v3 EMA + clamp by Partner A on 2026-04-23 \u2192 v4 adaptive-EMA + blink-gate + clamped-tightline + localUp-wing rewrite by Partner B on 2026-04-23",
+      "tryon-engine::renderContour \u2014 v2 cheekbone-arch (morning) + v3 blurred-stroke + highlight pass (afternoon) by Partner A \u2192 v4 FACE_OVAL-clip + toContourHex + shadow/definition split + cheekbone>jaw weighting rewrite by Partner B on 2026-04-23",
+      "tryon-engine::CONTOUR_CHEEKBONE_L/R + CONTOUR_TEMPLE_L/R alias \u2014 added by Partner A on 2026-04-23",
+      "tryon-engine::FACE_OVAL + toContourHex + eyeAperture + adaptive smoothLidPoint \u2014 added by Partner B on 2026-04-23 as part of v4",
+      "design-system/* \u2014 MASTER + per-page overrides + upgrade plan + launch checklist authored by Partner B on 2026-04-23; page overrides govern work that lives in Partner A's area (globals-css, tryon-page markup)"
+    ]
+  },
+  "conflictAvoidance": {
+    "privateRoute": "app/try-on/_components/ is claude-owned. Cursor edits controls-panel markup + globals-css.",
+    "engineRules": "Landmark index arrays and gradient polarity are claude-owned. Don't touch without sync note in DECISIONS.md.",
+    "currentCrossOwnershipNote": "Partner B edited renderContour and renderEyeliner on 2026-04-23 to v4 \u2014 Partner A should re-inspect when next claiming the engine. Design-system docs are Partner B-authored but govern UI work that is Partner A's ownership; follow the upgrade plan phase order to avoid stepping on each other."
+  }
+}

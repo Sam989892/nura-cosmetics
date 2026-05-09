@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /cart
+Disallow: /checkout
+Disallow: /admin
+
+Sitemap: https://nuracosmetics.co.uk/sitemap.xml
+Host: https://nuracosmetics.co.uk

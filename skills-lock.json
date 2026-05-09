@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "nano-banana-pro-prompts-recommend-skill": {
+      "source": "YouMind-OpenLab/nano-banana-pro-prompts-recommend-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "17067111a9414c8c6c63cbba2e749588ef6c7b78f316d9e718ee25ed33b072a7"
+    }
+  }
+}

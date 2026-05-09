@@ -1,0 +1,1 @@
+{"nodes": [{"id": "web_crawl_policy_open", "label": "Open robots crawling policy", "file_type": "document", "source_file": "app/robots.txt"}], "edges": [{"source": "web_crawl_policy_open", "target": "metadata_seo_positioning", "relation": "conceptually_related_to", "confidence": "EXTRACTED", "confidence_score": 1.0, "source_file": "app/robots.txt"}], "hyperedges": []}
