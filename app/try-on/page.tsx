@@ -1,25 +1,17 @@
 "use client";
-// NURA Virtual Try-On Studio v4
+// NURA Virtual Try-On Studio v5
 // ─────────────────────────────
 // Pipeline:
-//   1. User selects a source (live camera, uploaded photo, or a diverse model illustration).
-//   2. FaceMesh + Hands load lazily from CDN (only when camera / upload is selected).
-//   3. Every animation frame:
-//        - camera/upload  → MediaPipe detection → render active layers on the real face
-//        - model          → stylised portrait + layers painted directly on known regions
+//   1. User selects a source (live camera or uploaded photo).
+//   2. FaceMesh loads lazily from CDN on first use.
+//   3. Every animation frame: MediaPipe detection → render active layers on real face.
+//   4. On scan complete: POST to /api/analyze → skin tone + undertone + face shape
+//      + personalised shade recommendations returned from server.
 //
-// v4 changes:
-//   - Global error / unhandledrejection swallowers for the known-harmless
-//     @mediapipe/face_mesh loader `xhr.onprogress` TypeError. Keeps the
-//     Next.js dev overlay quiet without masking real failures.
-//   - Loop reads mutable state from refs — stable useCallback, no RAF thrash.
-//   - faceDetected transitions only (with ~500 ms hysteresis) — no flicker.
-//   - Camera start-up race fixed. Permission denial shows a friendly chip,
-//     not a full-stage error takeover.
-//   - Layer chip is a true single-click toggle. Active-layer pills carry ×.
-//   - Source selector fully button-based.
-//   - Model mode renders all 7 layers directly on the painted portrait's
-//     known regions (no synthetic MediaPipe landmarks).
+// Architecture:
+//   - All per-frame rendering is client-side (required for real-time AR).
+//   - One-shot skin analysis and recommendations are server-side (/api/analyze).
+//   - /api/products serves the full catalog with Cache-Control headers.
 
 import {
   Suspense,
@@ -60,7 +52,7 @@ import ProfileCard, {
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
 
-type SourceMode = "camera" | "upload" | "model";
+type SourceMode = "camera" | "upload";
 const ENABLE_LIVE_CAMERA = false;
 type SkinTone = "fair" | "light" | "medium" | "tan" | "deep";
 type CatKey =
@@ -111,44 +103,6 @@ const ALL_CATS: ActiveCatKey[] = [
   "eyeshadow",
 ];
 
-type ModelDef = {
-  name: string;
-  skin: SkinTone;
-  skinHex: string;
-  hairHex: string;
-  gradient: string;
-};
-
-const MODELS: ModelDef[] = [
-  {
-    name: "Aisha",
-    skin: "medium",
-    skinHex: "#c89878",
-    hairHex: "#2b1e17",
-    gradient: "linear-gradient(135deg,#c89878,#a37353)",
-  },
-  {
-    name: "Zainab",
-    skin: "tan",
-    skinHex: "#a37353",
-    hairHex: "#1f1410",
-    gradient: "linear-gradient(135deg,#a37353,#6d4733)",
-  },
-  {
-    name: "Meera",
-    skin: "light",
-    skinHex: "#e3b999",
-    hairHex: "#3b2a1f",
-    gradient: "linear-gradient(135deg,#e3b999,#c89878)",
-  },
-  {
-    name: "Fatima",
-    skin: "deep",
-    skinHex: "#6d4733",
-    hairHex: "#140a05",
-    gradient: "linear-gradient(135deg,#6d4733,#3d2419)",
-  },
-];
 
 // MediaPipe CDN — pinned to the latest published builds on jsdelivr/npm.
 // face_mesh's xhr.onprogress TypeError is harmless noise (assets still
@@ -308,749 +262,6 @@ function centroid(pts: Point[]): Point {
   return { x: s.x / pts.length, y: s.y / pts.length };
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Model-mode portrait + region map
-// ──────────────────────────────────────────────────────────────────────────────
-
-interface EyeRegion {
-  innerCorner: Point;
-  outerCorner: Point;
-  /** Upper-lid arc points from inner → top → outer. Used by eyeliner. */
-  liner: Point[];
-  /** Closed lid polygon used by eyeshadow base fill. */
-  lid: Point[];
-  /** Crease polygon used by eyeshadow gradient fade. */
-  crease: Point[];
-}
-
-interface PortraitRegions {
-  cx: number;
-  cy: number;
-  faceRx: number;
-  faceRy: number;
-  faceWidthPx: number;
-  lipsOuter: Point[];
-  lipsInner: Point[];
-  cheekL: Point;
-  cheekR: Point;
-  eyeL: EyeRegion;
-  eyeR: EyeRegion;
-  jawL: Point[];
-  jawR: Point[];
-  templeL: Point[];
-  templeR: Point[];
-}
-
-function drawPortrait(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  model: ModelDef
-): PortraitRegions {
-  // Background wash
-  const bg = ctx.createLinearGradient(0, 0, 0, h);
-  bg.addColorStop(0, "#f7ede0");
-  bg.addColorStop(1, "#e7d8bd");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, w, h);
-
-  const cx = w / 2;
-  const cy = h * 0.44;
-  const faceRx = Math.min(w, h) * 0.22;
-  const faceRy = Math.min(w, h) * 0.3;
-  const faceWidthPx = faceRx * 2;
-
-  // Shoulders / neck
-  ctx.fillStyle = shade(model.skinHex, -0.1);
-  ctx.fillRect(cx - faceRx * 0.5, cy + faceRy * 0.7, faceRx, h);
-  ctx.beginPath();
-  ctx.moveTo(0, h);
-  ctx.quadraticCurveTo(cx, h * 0.78, w, h);
-  ctx.closePath();
-  ctx.fillStyle = shade(model.skinHex, -0.25);
-  ctx.fill();
-
-  // Hair back-halo
-  ctx.fillStyle = model.hairHex;
-  ctx.beginPath();
-  ctx.ellipse(
-    cx,
-    cy - faceRy * 0.05,
-    faceRx * 1.25,
-    faceRy * 1.15,
-    0,
-    0,
-    Math.PI * 2
-  );
-  ctx.fill();
-
-  // Face
-  ctx.fillStyle = model.skinHex;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, faceRx, faceRy, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Face shading
-  const faceShade = ctx.createRadialGradient(
-    cx,
-    cy - faceRy * 0.3,
-    faceRx * 0.1,
-    cx,
-    cy,
-    faceRx
-  );
-  faceShade.addColorStop(0, "rgba(255,255,255,0.08)");
-  faceShade.addColorStop(1, "rgba(0,0,0,0.15)");
-  ctx.fillStyle = faceShade;
-  ctx.beginPath();
-  ctx.ellipse(cx, cy, faceRx, faceRy, 0, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Hair front fringe
-  ctx.fillStyle = model.hairHex;
-  ctx.beginPath();
-  ctx.moveTo(cx - faceRx, cy - faceRy * 0.6);
-  ctx.quadraticCurveTo(
-    cx - faceRx * 0.4,
-    cy - faceRy * 1.05,
-    cx + faceRx * 0.3,
-    cy - faceRy * 0.85
-  );
-  ctx.quadraticCurveTo(
-    cx + faceRx * 0.9,
-    cy - faceRy * 0.5,
-    cx + faceRx,
-    cy - faceRy * 0.2
-  );
-  ctx.quadraticCurveTo(
-    cx + faceRx * 0.7,
-    cy - faceRy * 0.7,
-    cx,
-    cy - faceRy * 0.62
-  );
-  ctx.quadraticCurveTo(
-    cx - faceRx * 0.6,
-    cy - faceRy * 0.55,
-    cx - faceRx,
-    cy - faceRy * 0.6
-  );
-  ctx.closePath();
-  ctx.fill();
-
-  // Eyes — geometry shared with region map
-  const eyeY = cy - faceRy * 0.12;
-  const eyeDX = faceRx * 0.42;
-  const eyeW = faceRx * 0.22;
-  const eyeH = faceRy * 0.06;
-
-  const buildEye = (sign: -1 | 1): EyeRegion => {
-    const ex = cx + sign * eyeDX;
-    const innerCorner = { x: ex + (sign === 1 ? -eyeW : eyeW), y: eyeY };
-    const outerCorner = { x: ex + (sign === 1 ? eyeW : -eyeW), y: eyeY };
-    // Inner → top → outer arc for the upper lash line (ordered so the wing
-    // lands at outerCorner, exactly like FaceMesh's outer-eye order).
-    const liner: Point[] = [];
-    const LINER_SAMPLES = 9;
-    for (let i = 0; i < LINER_SAMPLES; i++) {
-      const t = i / (LINER_SAMPLES - 1);
-      // Arc: start at inner corner, peak over the eye, end at outer.
-      const px =
-        innerCorner.x + (outerCorner.x - innerCorner.x) * t;
-      const arc = Math.sin(t * Math.PI);
-      const py = eyeY - arc * eyeH;
-      liner.push({ x: px, y: py });
-    }
-    // Lid polygon — upper arc then lower arc (closed). Used for eyeshadow base.
-    const lid: Point[] = [];
-    const LID_SAMPLES = 10;
-    for (let i = 0; i < LID_SAMPLES; i++) {
-      const t = i / (LID_SAMPLES - 1);
-      const px = innerCorner.x + (outerCorner.x - innerCorner.x) * t;
-      const arc = Math.sin(t * Math.PI);
-      lid.push({ x: px, y: eyeY - arc * eyeH * 0.95 - eyeH * 0.15 });
-    }
-    // Back along a gentler arc just above the lash line.
-    for (let i = LID_SAMPLES - 1; i >= 0; i--) {
-      const t = i / (LID_SAMPLES - 1);
-      const px = innerCorner.x + (outerCorner.x - innerCorner.x) * t;
-      const arc = Math.sin(t * Math.PI);
-      lid.push({ x: px, y: eyeY - arc * eyeH * 0.2 });
-    }
-    // Crease polygon — a wider fan above the lid used for the upward gradient.
-    const crease: Point[] = [];
-    const CREASE_SAMPLES = 10;
-    for (let i = 0; i < CREASE_SAMPLES; i++) {
-      const t = i / (CREASE_SAMPLES - 1);
-      const px = innerCorner.x + (outerCorner.x - innerCorner.x) * t;
-      const arc = Math.sin(t * Math.PI);
-      crease.push({
-        x: px,
-        y: eyeY - arc * eyeH * 1.9 - eyeH * 0.6,
-      });
-    }
-    for (let i = CREASE_SAMPLES - 1; i >= 0; i--) {
-      const t = i / (CREASE_SAMPLES - 1);
-      const px = innerCorner.x + (outerCorner.x - innerCorner.x) * t;
-      const arc = Math.sin(t * Math.PI);
-      crease.push({ x: px, y: eyeY - arc * eyeH * 0.95 - eyeH * 0.2 });
-    }
-    return { innerCorner, outerCorner, liner, lid, crease };
-  };
-
-  const eyeL = buildEye(-1);
-  const eyeR = buildEye(1);
-
-  // Eye fills
-  for (const sign of [-1, 1] as const) {
-    const ex = cx + sign * eyeDX;
-    ctx.fillStyle = "#f8f5f0";
-    ctx.beginPath();
-    ctx.ellipse(ex, eyeY, eyeW, eyeH, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#3a2212";
-    ctx.beginPath();
-    ctx.arc(ex, eyeY, eyeH * 0.95, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#0b0604";
-    ctx.beginPath();
-    ctx.arc(ex, eyeY, eyeH * 0.42, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    ctx.beginPath();
-    ctx.arc(ex - eyeH * 0.3, eyeY - eyeH * 0.3, eyeH * 0.18, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Brows
-  ctx.strokeStyle = model.hairHex;
-  ctx.lineWidth = Math.max(2, faceRx * 0.035);
-  ctx.lineCap = "round";
-  for (const sign of [-1, 1] as const) {
-    const ex = cx + sign * eyeDX;
-    ctx.beginPath();
-    ctx.moveTo(ex - eyeW * (sign === -1 ? 1.05 : 0.9), eyeY - eyeH * 3.4);
-    ctx.quadraticCurveTo(
-      ex,
-      eyeY - eyeH * 4.2,
-      ex + eyeW * (sign === -1 ? 0.9 : 1.05),
-      eyeY - eyeH * 2.9
-    );
-    ctx.stroke();
-  }
-
-  // Nose
-  ctx.strokeStyle = shade(model.skinHex, -0.18);
-  ctx.lineWidth = Math.max(2, faceRx * 0.02);
-  ctx.beginPath();
-  ctx.moveTo(cx - faceRx * 0.05, cy - faceRy * 0.05);
-  ctx.quadraticCurveTo(
-    cx,
-    cy + faceRy * 0.2,
-    cx + faceRx * 0.1,
-    cy + faceRy * 0.22
-  );
-  ctx.stroke();
-
-  // Nostrils
-  ctx.fillStyle = shade(model.skinHex, -0.35);
-  ctx.beginPath();
-  ctx.ellipse(
-    cx - faceRx * 0.06,
-    cy + faceRy * 0.26,
-    faceRx * 0.02,
-    faceRx * 0.012,
-    0,
-    0,
-    Math.PI * 2
-  );
-  ctx.ellipse(
-    cx + faceRx * 0.06,
-    cy + faceRy * 0.26,
-    faceRx * 0.02,
-    faceRx * 0.012,
-    0,
-    0,
-    Math.PI * 2
-  );
-  ctx.fill();
-
-  // Lips base — shape + region. Upper-arc followed by lower-arc, closed.
-  const lipY = cy + faceRy * 0.48;
-  const lipW = faceRx * 0.38;
-  const lipH = faceRy * 0.08;
-
-  const lipsOuter: Point[] = [
-    { x: cx - lipW, y: lipY },
-    { x: cx - lipW * 0.75, y: lipY - lipH * 0.75 },
-    { x: cx - lipW * 0.4, y: lipY - lipH * 0.4 },
-    { x: cx - lipW * 0.18, y: lipY - lipH * 0.2 },
-    { x: cx, y: lipY - lipH * 0.55 },
-    { x: cx + lipW * 0.18, y: lipY - lipH * 0.2 },
-    { x: cx + lipW * 0.4, y: lipY - lipH * 0.4 },
-    { x: cx + lipW * 0.75, y: lipY - lipH * 0.75 },
-    { x: cx + lipW, y: lipY },
-    { x: cx + lipW * 0.7, y: lipY + lipH * 1.0 },
-    { x: cx + lipW * 0.35, y: lipY + lipH * 1.1 },
-    { x: cx, y: lipY + lipH * 1.0 },
-    { x: cx - lipW * 0.35, y: lipY + lipH * 1.1 },
-    { x: cx - lipW * 0.7, y: lipY + lipH * 1.0 },
-  ];
-  const lipsInner: Point[] = [
-    { x: cx - lipW * 0.85, y: lipY + lipH * 0.05 },
-    { x: cx - lipW * 0.5, y: lipY - lipH * 0.05 },
-    { x: cx, y: lipY + lipH * 0.1 },
-    { x: cx + lipW * 0.5, y: lipY - lipH * 0.05 },
-    { x: cx + lipW * 0.85, y: lipY + lipH * 0.05 },
-    { x: cx + lipW * 0.5, y: lipY + lipH * 0.25 },
-    { x: cx, y: lipY + lipH * 0.35 },
-    { x: cx - lipW * 0.5, y: lipY + lipH * 0.25 },
-  ];
-  ctx.fillStyle = shade(model.skinHex, -0.45);
-  fillPoly(ctx, lipsOuter);
-
-  // Soft mouth line
-  ctx.strokeStyle = shade(model.skinHex, -0.55);
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx - lipW * 0.95, lipY);
-  ctx.quadraticCurveTo(cx, lipY + lipH * 0.1, cx + lipW * 0.95, lipY);
-  ctx.stroke();
-
-  // Cheek centers
-  const cheekL: Point = { x: cx - faceRx * 0.55, y: cy + faceRy * 0.18 };
-  const cheekR: Point = { x: cx + faceRx * 0.55, y: cy + faceRy * 0.18 };
-
-  // Jaw + temple strips (used for contour)
-  const jawL: Point[] = [
-    { x: cx - faceRx * 0.95, y: cy + faceRy * 0.35 },
-    { x: cx - faceRx * 0.85, y: cy + faceRy * 0.6 },
-    { x: cx - faceRx * 0.65, y: cy + faceRy * 0.82 },
-    { x: cx - faceRx * 0.35, y: cy + faceRy * 0.95 },
-  ];
-  const jawR: Point[] = [
-    { x: cx + faceRx * 0.95, y: cy + faceRy * 0.35 },
-    { x: cx + faceRx * 0.85, y: cy + faceRy * 0.6 },
-    { x: cx + faceRx * 0.65, y: cy + faceRy * 0.82 },
-    { x: cx + faceRx * 0.35, y: cy + faceRy * 0.95 },
-  ];
-  const templeL: Point[] = [
-    { x: cx - faceRx * 0.95, y: cy - faceRy * 0.35 },
-    { x: cx - faceRx * 0.85, y: cy - faceRy * 0.15 },
-    { x: cx - faceRx * 0.72, y: cy + faceRy * 0.05 },
-  ];
-  const templeR: Point[] = [
-    { x: cx + faceRx * 0.95, y: cy - faceRy * 0.35 },
-    { x: cx + faceRx * 0.85, y: cy - faceRy * 0.15 },
-    { x: cx + faceRx * 0.72, y: cy + faceRy * 0.05 },
-  ];
-
-  return {
-    cx,
-    cy,
-    faceRx,
-    faceRy,
-    faceWidthPx,
-    lipsOuter,
-    lipsInner,
-    cheekL,
-    cheekR,
-    eyeL,
-    eyeR,
-    jawL,
-    jawR,
-    templeL,
-    templeR,
-  };
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// applyPortraitLayers — paint each active layer directly onto known regions
-// using the same compositing verbs as the real-face renderers. Eyeliner,
-// eyeshadow and contour are re-implemented locally so we don't depend on
-// MediaPipe's topological ordering at all in model mode.
-// ──────────────────────────────────────────────────────────────────────────────
-
-function paintLipsBase(
-  ctx: CanvasRenderingContext2D,
-  lipsOuter: Point[],
-  lipsInner: Point[],
-  hex: string,
-  alpha: number
-) {
-  ctx.save();
-  ctx.globalCompositeOperation = "multiply";
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = hex;
-  ctx.beginPath();
-  ctx.moveTo(lipsOuter[0].x, lipsOuter[0].y);
-  for (let i = 1; i < lipsOuter.length; i++)
-    ctx.lineTo(lipsOuter[i].x, lipsOuter[i].y);
-  ctx.closePath();
-  ctx.moveTo(lipsInner[0].x, lipsInner[0].y);
-  for (let i = 1; i < lipsInner.length; i++)
-    ctx.lineTo(lipsInner[i].x, lipsInner[i].y);
-  ctx.closePath();
-  ctx.fill("evenodd");
-  ctx.restore();
-}
-
-function paintLipsHighlight(
-  ctx: CanvasRenderingContext2D,
-  lipsOuter: Point[],
-  size: "tight" | "broad",
-  alpha: number
-) {
-  const c = centroid(lipsOuter);
-  ctx.save();
-  ctx.globalCompositeOperation = "screen";
-  ctx.globalAlpha = alpha;
-  const radius = size === "tight" ? 32 : 64;
-  const grad = ctx.createRadialGradient(c.x, c.y - 2, 2, c.x, c.y, radius);
-  grad.addColorStop(0, "rgba(255,255,255,0.95)");
-  grad.addColorStop(0.5, "rgba(255,255,255,0.3)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
-  fillPoly(ctx, lipsOuter);
-  ctx.restore();
-}
-
-function paintLipsByFinish(
-  ctx: CanvasRenderingContext2D,
-  lipsOuter: Point[],
-  lipsInner: Point[],
-  hex: string,
-  intensity: number,
-  finish: LipFinish
-) {
-  switch (finish) {
-    case "matte":
-      paintLipsBase(ctx, lipsOuter, lipsInner, hex, 0.5 + intensity * 0.45);
-      return;
-    case "satin":
-      paintLipsBase(ctx, lipsOuter, lipsInner, hex, 0.45 + intensity * 0.45);
-      paintLipsHighlight(ctx, lipsOuter, "broad", 0.18 + intensity * 0.12);
-      return;
-    case "glossy":
-      paintLipsBase(ctx, lipsOuter, lipsInner, hex, 0.45 + intensity * 0.45);
-      paintLipsHighlight(ctx, lipsOuter, "tight", 0.35 + intensity * 0.2);
-      return;
-    case "sheer":
-      paintLipsBase(ctx, lipsOuter, lipsInner, hex, 0.25 + intensity * 0.25);
-      paintLipsHighlight(ctx, lipsOuter, "broad", 0.16 + intensity * 0.12);
-      return;
-    case "shimmer":
-      paintLipsBase(ctx, lipsOuter, lipsInner, hex, 0.45 + intensity * 0.4);
-      paintLipsHighlight(ctx, lipsOuter, "tight", 0.3 + intensity * 0.2);
-      paintLipsShimmer(ctx, lipsOuter, lipsInner, intensity);
-      return;
-  }
-}
-
-function paintLipsShimmer(
-  ctx: CanvasRenderingContext2D,
-  lipsOuter: Point[],
-  lipsInner: Point[],
-  intensity: number
-) {
-  let s = (0xa57c | Math.floor(intensity * 100)) >>> 0;
-  const rand = () => {
-    s = (s * 1664525 + 1013904223) >>> 0;
-    return s / 0xffffffff;
-  };
-  const minX = Math.min(...lipsOuter.map((p) => p.x));
-  const maxX = Math.max(...lipsOuter.map((p) => p.x));
-  const minY = Math.min(...lipsOuter.map((p) => p.y));
-  const maxY = Math.max(...lipsOuter.map((p) => p.y));
-  const innerMinY = Math.min(...lipsInner.map((p) => p.y));
-  const innerMaxY = Math.max(...lipsInner.map((p) => p.y));
-  ctx.save();
-  ctx.globalCompositeOperation = "screen";
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  for (let i = 0; i < 28; i++) {
-    const x = minX + rand() * (maxX - minX);
-    const y = minY + rand() * (maxY - minY);
-    if (y > innerMinY && y < innerMaxY) continue;
-    const r = 0.5 + rand() * 1.4;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-function paintBlushOnRegions(
-  ctx: CanvasRenderingContext2D,
-  regions: PortraitRegions,
-  hex: string,
-  intensity: number,
-  placement: BlushPlacement,
-  formula: BlushFormula
-) {
-  const { cheekL, cheekR, faceWidthPx, cx, cy, faceRy } = regions;
-  const blend: GlobalCompositeOperation =
-    formula === "cream" ? "soft-light" : "multiply";
-  const baseAlpha =
-    formula === "cream" ? 0.6 + intensity * 0.35 : 0.35 + intensity * 0.35;
-
-  const radial = (
-    c: Point,
-    rx: number,
-    ry: number,
-    rotation: number,
-    alpha: number
-  ) => {
-    ctx.save();
-    ctx.globalCompositeOperation = blend;
-    ctx.globalAlpha = alpha;
-    ctx.translate(c.x, c.y);
-    ctx.rotate(rotation);
-    const g = ctx.createRadialGradient(0, 0, rx * 0.05, 0, 0, rx);
-    g.addColorStop(0, hex);
-    g.addColorStop(0.55, hex + "99");
-    g.addColorStop(1, hex + "00");
-    ctx.fillStyle = g;
-    ctx.scale(1, ry / rx);
-    ctx.beginPath();
-    ctx.arc(0, 0, rx, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  };
-
-  switch (placement) {
-    case "apples": {
-      const rx = faceWidthPx * 0.2;
-      const ry = faceWidthPx * 0.16;
-      radial(cheekL, rx, ry, 0, baseAlpha);
-      radial(cheekR, rx, ry, 0, baseAlpha);
-      return;
-    }
-    case "lifted": {
-      const rx = faceWidthPx * 0.22;
-      const ry = faceWidthPx * 0.11;
-      const liftedL: Point = { x: cheekL.x + faceWidthPx * 0.05, y: cheekL.y - faceRy * 0.18 };
-      const liftedR: Point = { x: cheekR.x - faceWidthPx * 0.05, y: cheekR.y - faceRy * 0.18 };
-      radial(liftedL, rx, ry, -0.25, baseAlpha);
-      radial(liftedR, rx, ry, 0.25, baseAlpha);
-      return;
-    }
-    case "diffused": {
-      const rx = faceWidthPx * 0.24;
-      const ry = faceWidthPx * 0.14;
-      const a = baseAlpha * 0.6;
-      radial(cheekL, rx, ry, -0.1, a);
-      radial(cheekR, rx, ry, 0.1, a);
-      const noseBridge: Point = { x: cx, y: cy - regions.faceRy * 0.05 };
-      radial(noseBridge, rx * 0.7, ry * 0.7, 0, a * 0.7);
-      return;
-    }
-  }
-}
-
-function paintHighlightPass(
-  ctx: CanvasRenderingContext2D,
-  regions: PortraitRegions,
-  intensity: number
-) {
-  const { cx, cy, faceRx, faceRy, faceWidthPx, cheekL, cheekR } = regions;
-  const r = faceWidthPx * 0.09;
-  const alpha = 0.18 + intensity * 0.18;
-
-  const dot = (c: Point, radius: number, a: number) => {
-    ctx.save();
-    ctx.globalCompositeOperation = "screen";
-    ctx.globalAlpha = a;
-    const g = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, radius);
-    g.addColorStop(0, "rgba(255,245,230,0.95)");
-    g.addColorStop(0.4, "rgba(255,245,230,0.4)");
-    g.addColorStop(1, "rgba(255,245,230,0)");
-    ctx.fillStyle = g;
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  };
-
-  dot({ x: cx, y: cy - faceRy * 0.5 }, r, alpha);
-  dot({ x: cx, y: cy + faceRy * 0.05 }, r * 0.7, alpha);
-  dot({ x: cheekL.x + faceWidthPx * 0.05, y: cheekL.y - faceRy * 0.05 }, r * 0.85, alpha);
-  dot({ x: cheekR.x - faceWidthPx * 0.05, y: cheekR.y - faceRy * 0.05 }, r * 0.85, alpha);
-  dot({ x: cx, y: cy + faceRy * 0.42 }, r * 0.45, alpha * 0.8);
-  dot({ x: cx, y: cy + faceRy * 0.95 }, r * 0.55, alpha * 0.7);
-  void faceRx;
-}
-
-function applyPortraitLayers(
-  ctx: CanvasRenderingContext2D,
-  regions: PortraitRegions,
-  layers: Record<ActiveCatKey, LayerState>,
-  substrateUndertone: Undertone | null
-) {
-  const { lipsOuter, lipsInner, eyeL, eyeR, faceWidthPx } = regions;
-
-  const resolveShade = (cat: ActiveCatKey): Shade | null => {
-    const layer = layers[cat];
-    if (!layer.active) return null;
-    const prod = products.find((p) => p.slug === layer.productSlug);
-    if (!prod) return null;
-    return (prod.shades[layer.shadeIdx] as Shade) ?? null;
-  };
-
-  // Lipstick — pure multiply matte (matches the v2 camera look).
-  const lipstick = resolveShade("lipstick");
-  if (lipstick) {
-    const layer = layers.lipstick;
-    paintLipsByFinish(
-      ctx,
-      lipsOuter,
-      lipsInner,
-      lipstick.hex,
-      layer.intensity,
-      layer.lipFinish ?? "matte"
-    );
-  }
-
-  void substrateUndertone;
-
-  // Blush — placement + formula aware.
-  const blush = resolveShade("blush");
-  if (blush) {
-    const layer = layers.blush;
-    paintBlushOnRegions(
-      ctx,
-      regions,
-      blush.hex,
-      layer.intensity,
-      layer.blushPlacement ?? "apples",
-      layer.blushFormula ?? "cream"
-    );
-  }
-
-  // Eyeshadow — lid + crease + inner-corner cream highlight.
-  // Portrait mode uses "source-over" (not "multiply") so all shades — including
-  // light ones like Ivory Silk — are visible against the illustrated skin.
-  const eyeshadow = resolveShade("eyeshadow");
-  if (eyeshadow) {
-    const intensity = layers.eyeshadow.intensity;
-    const [r, g, b] = hexToRgb(eyeshadow.hex);
-
-    ctx.save();
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = 0.38 + intensity * 0.32;
-    ctx.fillStyle = eyeshadow.hex;
-    fillPoly(ctx, eyeL.lid);
-    fillPoly(ctx, eyeR.lid);
-    ctx.restore();
-
-    ctx.save();
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = 0.28 + intensity * 0.28;
-    for (const pts of [eyeL.crease, eyeR.crease]) {
-      const top = pts.reduce((a, p) => (a.y < p.y ? a : p));
-      const bot = pts.reduce((a, p) => (a.y > p.y ? a : p));
-      const grad = ctx.createLinearGradient(top.x, top.y, bot.x, bot.y);
-      // Gradient: opaque at top (crease depth) fading to transparent at bottom
-      // (merging into the lid). This matches the real renderEyeshadow direction.
-      grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
-      grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
-      ctx.fillStyle = grad;
-      fillPoly(ctx, pts);
-    }
-    ctx.restore();
-
-    // Inner-corner cream highlight.
-    ctx.save();
-    ctx.globalCompositeOperation = "screen";
-    ctx.globalAlpha = 0.55;
-    for (const eye of [eyeL, eyeR]) {
-      const pt = eye.innerCorner;
-      const grad = ctx.createRadialGradient(pt.x, pt.y, 0, pt.x, pt.y, 8);
-      grad.addColorStop(0, "rgba(248,239,225,0.95)");
-      grad.addColorStop(1, "rgba(248,239,225,0)");
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  // Eyeliner — style-aware (tightline / winged / smudged).
-  const eyeliner = resolveShade("eyeliner");
-  if (eyeliner) {
-    const layer = layers.eyeliner;
-    const style = layer.eyelinerStyle ?? "winged";
-    const intensity = layer.intensity;
-    const baseThickness = faceWidthPx * 0.008;
-
-    if (style === "tightline") {
-      const thickness = baseThickness * 0.4 + intensity * baseThickness * 0.3;
-      ctx.save();
-      ctx.strokeStyle = eyeliner.hex;
-      ctx.lineCap = "round";
-      ctx.globalAlpha = 0.95;
-      ctx.lineWidth = thickness;
-      smoothPath(ctx, eyeL.liner);
-      ctx.stroke();
-      smoothPath(ctx, eyeR.liner);
-      ctx.stroke();
-      ctx.restore();
-    } else if (style === "smudged") {
-      const thickness = baseThickness * 1.3 + intensity * baseThickness * 1.5;
-      ctx.save();
-      ctx.strokeStyle = eyeliner.hex;
-      ctx.lineCap = "round";
-      ctx.globalAlpha = 0.6 + intensity * 0.25;
-      (ctx as any).filter = "blur(2px)";
-      ctx.lineWidth = thickness;
-      smoothPath(ctx, eyeL.liner);
-      ctx.stroke();
-      smoothPath(ctx, eyeR.liner);
-      ctx.stroke();
-      (ctx as any).filter = "none";
-      ctx.lineWidth = thickness * 0.6;
-      ctx.globalAlpha = 0.85;
-      smoothPath(ctx, eyeL.liner);
-      ctx.stroke();
-      smoothPath(ctx, eyeR.liner);
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      const thickness = baseThickness + intensity * baseThickness * 1.5;
-      ctx.save();
-      ctx.strokeStyle = eyeliner.hex;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.globalAlpha = 0.88 + intensity * 0.12;
-      for (const eye of [eyeL, eyeR]) {
-        ctx.lineWidth = thickness;
-        smoothPath(ctx, eye.liner);
-        ctx.stroke();
-
-        const last = eye.liner[eye.liner.length - 1];
-        const prev = eye.liner[eye.liner.length - 2];
-        const dx = last.x - prev.x;
-        const dy = last.y - prev.y;
-        const len = Math.hypot(dx, dy);
-        if (len > 0) {
-          const nx = dx / len;
-          const ny = dy / len;
-          const wingLen = faceWidthPx * 0.025 * (0.5 + intensity * 0.5);
-          ctx.beginPath();
-          ctx.lineWidth = thickness * 0.8;
-          ctx.moveTo(last.x, last.y);
-          ctx.lineTo(
-            last.x + nx * wingLen,
-            last.y + ny * wingLen - faceWidthPx * 0.01
-          );
-          ctx.stroke();
-        }
-      }
-      ctx.restore();
-    }
-  }
-
-  // Nails removed — see "Coming Soon" treatment in UI.
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Component
@@ -1272,7 +483,6 @@ function TryOnClient() {
   const initialShade = sp.get("shade");
 
   const [source, setSource] = useState<SourceMode>("upload");
-  const [modelIdx, setModelIdx] = useState(0);
   const [layers, setLayers] = useState<Record<ActiveCatKey, LayerState>>(
     buildDefaultLayers
   );
@@ -1324,7 +534,6 @@ function TryOnClient() {
   // Mutable copies of state for the stable render loop.
   const sourceRef = useRef<SourceMode>("upload");
   const layersRef = useRef(layers);
-  const modelIdxRef = useRef(modelIdx);
   const detectedToneRef = useRef<string | null>(null);
 
   // Draggable compare divider — listen globally so fast drags don't lose the handle.
@@ -1361,9 +570,6 @@ function TryOnClient() {
   useEffect(() => {
     layersRef.current = layers;
   }, [layers]);
-  useEffect(() => {
-    modelIdxRef.current = modelIdx;
-  }, [modelIdx]);
   useEffect(() => {
     detectedToneRef.current = detectedTone;
   }, [detectedTone]);
@@ -1539,29 +745,6 @@ function TryOnClient() {
     const src = sourceRef.current;
     const layersNow = layersRef.current;
 
-    // Model mode — portrait + direct region painter, no MediaPipe.
-    if (src === "model") {
-      const w = (canvas.width = 640);
-      const h = (canvas.height = 800);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        rafRef.current = requestAnimationFrame(loop);
-        return;
-      }
-      const model = MODELS[modelIdxRef.current];
-      const regions = drawPortrait(ctx, w, h, model);
-      applyPortraitLayers(ctx, regions, layersNow, null);
-
-      // Model mode always has a "face" — flip state once.
-      if (!faceDetectedRef.current) {
-        faceDetectedRef.current = true;
-        setFaceDetected(true);
-      }
-      noFaceFramesRef.current = 0;
-
-      rafRef.current = requestAnimationFrame(loop);
-      return;
-    }
 
     // Camera / Upload — MediaPipe path.
     const srcEl: HTMLVideoElement | HTMLImageElement | null =
@@ -1742,26 +925,16 @@ function TryOnClient() {
     }
   }, [source, ensureModels]);
 
-  // Manage camera + stream + loop on source/model change.
+  // Manage camera + stream + loop on source change.
   useEffect(() => {
     // Reset detection state when source changes.
     latestLandmarks.current = null;
     smoothedLandmarks.current = null;
     noFaceFramesRef.current = 0;
-    if (faceDetectedRef.current !== (source === "model")) {
-      faceDetectedRef.current = source === "model";
-      setFaceDetected(source === "model");
-    }
-    if (source !== "model") {
-      detectedToneRef.current = null;
-      setDetectedTone(null);
-    } else {
-      const tone = MODELS[modelIdx].skin;
-      if (detectedToneRef.current !== tone) {
-        detectedToneRef.current = tone;
-        setDetectedTone(tone);
-      }
-    }
+    faceDetectedRef.current = false;
+    setFaceDetected(false);
+    detectedToneRef.current = null;
+    setDetectedTone(null);
 
     if (ENABLE_LIVE_CAMERA && source === "camera" && status === "ready") {
       startCamera();
@@ -1774,7 +947,7 @@ function TryOnClient() {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [source, modelIdx, photoUrl, status, startCamera, stopCamera, loop]);
+  }, [source, photoUrl, status, startCamera, stopCamera, loop]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -1789,33 +962,68 @@ function TryOnClient() {
     };
   }, [photoUrl]);
 
-  // Reset scan + profile when source changes so each session gets a
-  // fresh analysis. Stays quiet on model mode.
+  // Reset scan + profile when source changes so each session gets a fresh analysis.
   useEffect(() => {
     scanTriggeredRef.current = false;
-    // Model mode skips the gated narrative — no face to scan.
-    setFlowStage(source === "model" ? "playing" : "idle");
+    setFlowStage("idle");
     setProfile(null);
     setRecommendations([]);
-  }, [source, modelIdx]);
+  }, [source]);
 
   // Called by FaceScanOverlay when the scan animation finishes. Move to
-  // "curating", derive profile, wait ~1.4s for the curating copy to feel
-  // earned, then reveal the ProfileCard hero.
-  const onScanComplete = useCallback(() => {
+  // "curating", call /api/analyze with skin sample + landmarks, then reveal
+  // the ProfileCard hero once results arrive.
+  const onScanComplete = useCallback(async () => {
     setFlowStage("curating");
     const lm = latestLandmarks.current;
     const off = offscreenRef.current;
 
-    let profileReady: FaceProfile | null = null;
+    // Sample skin pixels client-side (fast, no server trip needed for raw pixels)
+    let skinSample = { r: 180, g: 140, b: 110 }; // safe fallback
     if (lm && off) {
-      try {
-        const tone = detectSkinTone(off, lm) as FaceProfile["tone"];
-        const undertone = detectUndertone(off, lm);
-        const shape = detectFaceShape(lm);
-        profileReady = { tone, undertone, shape };
-      } catch {
-        // Silent fall-through — user can still use the full panel.
+      const ctx = off.getContext("2d");
+      if (ctx) {
+        const samplePts = [10, 50, 280, 1, 151];
+        let r = 0, g = 0, b = 0, n = 0;
+        for (const idx of samplePts) {
+          const pt = lm[idx];
+          if (!pt) continue;
+          const px = Math.floor(pt.x * off.width);
+          const py = Math.floor(pt.y * off.height);
+          try {
+            const d = ctx.getImageData(Math.max(0, px - 6), Math.max(0, py - 6), 12, 12).data;
+            for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; n++; }
+          } catch {}
+        }
+        if (n > 0) skinSample = { r: r/n, g: g/n, b: b/n };
+      }
+    }
+
+    // Hit the backend for analysis — server handles tone/undertone/shape + recommendations
+    let profileReady: FaceProfile | null = null;
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skinSample, landmarks: lm ?? [] }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        profileReady = {
+          tone: data.skinTone.category,
+          undertone: data.undertone,
+          shape: data.faceShape,
+        };
+      }
+    } catch {
+      // Network error — fall back to client-side detection
+      if (lm && off) {
+        try {
+          const tone = detectSkinTone(off, lm) as FaceProfile["tone"];
+          const undertone = detectUndertone(off, lm);
+          const shape = detectFaceShape(lm);
+          profileReady = { tone, undertone, shape };
+        } catch {}
       }
     }
 
@@ -1832,11 +1040,10 @@ function TryOnClient() {
       } else {
         setFlowStage("playing");
       }
-    }, 1400);
+    }, 600); // shorter delay since server already added latency
   }, []);
 
   const startScan = useCallback(() => {
-    if (source === "model") return;
     scanTriggeredRef.current = true;
     setFlowStage("scanning");
   }, [source]);
@@ -1988,7 +1195,6 @@ function TryOnClient() {
   const showEngineError = status === "engine-failed";
   const showCameraDenied = source === "camera" && status === "camera-denied";
   const showNoFaceOverlay =
-    source !== "model" &&
     !showStartingCamera &&
     !showEngineLoading &&
     !showEngineError &&
@@ -2060,7 +1266,7 @@ function TryOnClient() {
               ref={canvasRef}
               aria-hidden
               style={
-                compareMode && source !== "model"
+                compareMode
                   ? {
                       clipPath: `inset(0 ${100 - compareValue}% 0 0)`,
                     }
@@ -2068,7 +1274,7 @@ function TryOnClient() {
               }
             />
 
-            {compareMode && source !== "model" && (
+            {compareMode && (
               <>
                 {/* Floating labels sit on the image halves, not on the line */}
                 <div className="tryon-compare-label tryon-compare-label--before"
@@ -2132,8 +1338,7 @@ function TryOnClient() {
             <FaceScanOverlay
               visible={
                 flowStage === "scanning" &&
-                faceDetected &&
-                source !== "model"
+                faceDetected
               }
               onComplete={onScanComplete}
             />
@@ -2142,11 +1347,9 @@ function TryOnClient() {
               <CuratingOverlay />
             )}
 
-            {flowStage === "idle" &&
-              faceDetected &&
-              source !== "model" && (
-                <ScanCTA onStart={startScan} />
-              )}
+            {flowStage === "idle" && faceDetected && (
+              <ScanCTA onStart={startScan} />
+            )}
 
             {showNoFaceOverlay && (
               <div className="tryon-no-face">
@@ -2259,15 +1462,13 @@ function TryOnClient() {
             >
               {snapMsg || "Save look"}
             </button>
-            {source !== "model" && (
-              <button
-                className="btn btn-ghost tryon-action-btn"
-                onClick={() => setCompareMode((v) => !v)}
-                aria-pressed={compareMode}
-              >
-                {compareMode ? "Hide Compare" : "Compare"}
-              </button>
-            )}
+            <button
+              className="btn btn-ghost tryon-action-btn"
+              onClick={() => setCompareMode((v) => !v)}
+              aria-pressed={compareMode}
+            >
+              {compareMode ? "Hide Compare" : "Compare"}
+            </button>
             <button
               className="btn btn-ghost tryon-action-btn"
               onClick={onReset}
@@ -2378,21 +1579,6 @@ function TryOnClient() {
               </button>
               */}
               {/* CAMERA_BUTTON_END */}
-              <button
-                type="button"
-                className={source === "model" ? "active" : ""}
-                onClick={() => setSource("model")}
-                aria-pressed={source === "model"}
-
-              >
-                <svg viewBox="0 0 24 24" aria-hidden>
-                  <path
-                    d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0"
-                    fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"
-                  />
-                </svg>
-                Model
-              </button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -2425,42 +1611,6 @@ function TryOnClient() {
               />
               <span>Keep current makeup layers when photo changes</span>
             </label>
-            {source === "model" && (
-              <div
-                style={{
-                  display: "flex",
-                  gap: 8,
-                  marginTop: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                {MODELS.map((m, i) => (
-                  <button
-                    key={m.name}
-                    type="button"
-                    className={`filter-chip ${
-                      modelIdx === i ? "active" : ""
-                    }`}
-                    onClick={() => setModelIdx(i)}
-                    aria-pressed={modelIdx === i}
-                    aria-label={`Use model ${m.name}`}
-                  >
-                    <span
-                      style={{
-                        width: 10,
-                        height: 10,
-                        borderRadius: "50%",
-                        display: "inline-block",
-                        background: m.skinHex,
-                        marginRight: 4,
-                        flexShrink: 0,
-                      }}
-                    />
-                    {m.name}
-                  </button>
-                ))}
-              </div>
-            )}
           </SourceSelector>
 
           {/* Layer toggle row */}
@@ -2655,7 +1805,7 @@ function TryOnClient() {
                       className={i === tabLayer.shadeIdx ? "active" : ""}
                       onClick={() => {
                         updateLayer(activeTab, { active: true, shadeIdx: i });
-                        if (source !== "model") setCompareMode(true);
+                        setCompareMode(true);
                       }}
                       aria-pressed={i === tabLayer.shadeIdx}
                     >
@@ -2666,11 +1816,7 @@ function TryOnClient() {
                 </div>
                 {detectedTone && (
                   <div className="tryon-recommend" style={{ marginTop: 8 }}>
-                    ★ Starred shades match{" "}
-                    {source === "model"
-                      ? "this model's"
-                      : "your detected"}{" "}
-                    tone (
+                    ★ Starred shades match your detected tone (
                     {skinTones.find((t) => t.slug === detectedTone)?.label})
                   </div>
                 )}
