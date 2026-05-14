@@ -4,6 +4,7 @@ import "@/styles/globals.css";
 import "@/styles/mobile.css";
 import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
+import CookieConsent from "@/components/CookieConsent";
 import { CartProvider } from "@/lib/cart";
 
 const cormorant = Cormorant_Garamond({
@@ -176,6 +177,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <Nav />
           <main id="main">{children}</main>
           <Footer />
+          <CookieConsent />
         </CartProvider>
       </body>
     </html>

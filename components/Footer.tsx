@@ -39,10 +39,25 @@ export default function Footer() {
               <li><Link href="/contact">MSDS Request</Link></li>
             </ul>
           </div>
+          <div>
+            <h4>Legal</h4>
+            <ul style={{ listStyle: "none", padding: 0, lineHeight: 2 }}>
+              <li><Link href="/privacy">Privacy Notice</Link></li>
+              <li><Link href="/privacy#section-8">Your Data Rights</Link></li>
+              <li>
+                <a href="mailto:privacy@nuracosmetics.co.uk">DPO Contact</a>
+              </li>
+              <li>
+                <a href="https://ico.org.uk/concerns/" target="_blank" rel="noreferrer">
+                  ICO Complaints
+                </a>
+              </li>
+            </ul>
+          </div>
         </div>
         <div className="footer-bottom">
           <div>© {new Date().getFullYear()} NURA Cosmetics Ltd, United Kingdom</div>
-          <div>MUI Halal Certified · Wudu-Friendly · Ethically Sourced</div>
+          <div>MUI Halal Certified · Wudu-Friendly · UK GDPR Compliant</div>
         </div>
       </div>
     </footer>

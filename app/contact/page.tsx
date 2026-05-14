@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Link from "next/link";
 
 type Status = "idle" | "sending" | "sent" | "error";
 
@@ -13,6 +14,8 @@ export default function ContactPage() {
     subject: "general",
     message: "",
   });
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [marketingOptIn, setMarketingOptIn] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -24,7 +27,14 @@ export default function ContactPage() {
       const res = await fetch("/api/contact", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          ...form,
+          consent: {
+            privacyVersion: "2026-05-14.v1",
+            termsAccepted,
+            marketingOptIn,
+          },
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -145,6 +155,30 @@ export default function ContactPage() {
                 />
               </div>
 
+              <div style={{ marginTop: 12, marginBottom: 12, fontSize: "0.85rem", lineHeight: 1.4 }}>
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={termsAccepted}
+                    onChange={(e) => setTermsAccepted(e.target.checked)}
+                    required
+                  />
+                  <span>
+                    I&apos;ve read the{" "}
+                    <Link href="/privacy" target="_blank">privacy notice</Link>{" "}
+                    and accept it. <span style={{ color: "#b94a3e" }}>*</span>
+                  </span>
+                </label>
+                <label style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <input
+                    type="checkbox"
+                    checked={marketingOptIn}
+                    onChange={(e) => setMarketingOptIn(e.target.checked)}
+                  />
+                  <span>Send me NURA news and shade drops.</span>
+                </label>
+              </div>
+
               {error && (
                 <div
                   role="alert"
@@ -165,7 +199,7 @@ export default function ContactPage() {
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={sending}
+                disabled={sending || !termsAccepted}
               >
                 {sending ? "Sending…" : "Send message"}
               </button>

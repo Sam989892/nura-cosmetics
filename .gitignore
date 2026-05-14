@@ -5,3 +5,7 @@ out/
 .DS_Store
 *.log
 .vercel
+
+# UK GDPR — local persistence directory (file-based dev DB).
+# Production should use Postgres / Vercel KV, see lib/db.ts.
+.nura-data/

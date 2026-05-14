@@ -47,6 +47,7 @@ import ProfileCard, {
   buildRecommendations,
   type Recommendation,
 } from "./_components/ProfileCard";
+import CapturePhotoModal from "./_components/CapturePhotoModal";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -497,6 +498,8 @@ function TryOnClient() {
   const [snapMsg, setSnapMsg] = useState("");
   const [compareMode, setCompareMode] = useState(false);
   const [compareValue, setCompareValue] = useState(50);
+  // Capture modal — the on-spot webcam photo-booth flow.
+  const [captureOpen, setCaptureOpen] = useState(false);
 
   // Gated narrative flow:
   //   idle → scanning → curating → showingProfile → playing
@@ -530,6 +533,13 @@ function TryOnClient() {
   const faceDetectedRef = useRef(false);
   const noFaceFramesRef = useRef(0);
   const cameraStartedRef = useRef(false);
+  // EXIF-corrected bitmap for uploaded photos (createImageBitmap applies orientation).
+  const uploadBitmapRef = useRef<ImageBitmap | null>(null);
+  // Stable ref to ensureModels so the RAF loop can call it without a dep.
+  const ensureModelsRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  // Counts consecutive no-detection frames on a static upload so we can
+  // force a FaceMesh reset and trigger a fresh full-image detection pass.
+  const noDetectUploadFrames = useRef(0);
 
   // Mutable copies of state for the stable render loop.
   const sourceRef = useRef<SourceMode>("upload");
@@ -698,12 +708,20 @@ function TryOnClient() {
         latestLandmarks.current = next;
       });
       faceMeshRef.current = fm;
+      // Keep stable ref in sync so the RAF loop can call ensureModels.
+      ensureModelsRef.current = ensureModels;
       setStatus("ready");
     } catch (e: any) {
       setErrorMsg(e?.message ?? "Face tracking failed to load.");
       setStatus("engine-failed");
     }
   }, []);
+
+  // Keep ensureModelsRef current after every render so the loop always has
+  // the latest version without needing it in the loop's dependency array.
+  useEffect(() => {
+    ensureModelsRef.current = ensureModels;
+  });
 
   const startCamera = useCallback(async () => {
     if (!videoRef.current) return;
@@ -746,20 +764,31 @@ function TryOnClient() {
     const layersNow = layersRef.current;
 
 
-    // Camera / Upload — MediaPipe path.
+    // ── Source element resolution ────────────────────────────────────────────
+    // For uploads we prefer the EXIF-corrected ImageBitmap (created in onUpload
+    // via createImageBitmap({ imageOrientation: 'from-image' })). This fixes
+    // portrait photos taken on phones where the raw pixel data is rotated 90°
+    // but the EXIF tag says "display rotated" — drawImage on a plain <img>
+    // ignores that tag in some browsers, sending a sideways face to MediaPipe.
+    const bitmap = src === "upload" ? uploadBitmapRef.current : null;
     const srcEl: HTMLVideoElement | HTMLImageElement | null =
       src === "camera" ? videoRef.current : imgRef.current;
 
-    const w = (canvas.width = srcEl
-      ? (srcEl as HTMLVideoElement).videoWidth ||
-        (srcEl as HTMLImageElement).naturalWidth ||
-        640
-      : 640);
-    const h = (canvas.height = srcEl
-      ? (srcEl as HTMLVideoElement).videoHeight ||
-        (srcEl as HTMLImageElement).naturalHeight ||
-        800
-      : 800);
+    // Bitmap dimensions take priority for uploads (they are post-EXIF dimensions).
+    const w = (canvas.width = bitmap
+      ? bitmap.width
+      : srcEl
+        ? (srcEl as HTMLVideoElement).videoWidth ||
+          (srcEl as HTMLImageElement).naturalWidth ||
+          640
+        : 640);
+    const h = (canvas.height = bitmap
+      ? bitmap.height
+      : srcEl
+        ? (srcEl as HTMLVideoElement).videoHeight ||
+          (srcEl as HTMLImageElement).naturalHeight ||
+          800
+        : 800);
 
     const ctx = canvas.getContext("2d");
     if (!ctx) {
@@ -767,17 +796,26 @@ function TryOnClient() {
       return;
     }
 
-    // Guard: uploaded image must be fully decoded before drawImage.
-    // Calling drawImage on an <img> with naturalWidth === 0 throws
-    // InvalidStateError (HTML spec). Since this loop is async, an uncaught
-    // throw here means requestAnimationFrame(loop) at the bottom never fires
-    // and the loop dies permanently. Skip this frame and retry next tick.
-    if (src === "upload" && srcEl && (srcEl as HTMLImageElement).naturalWidth === 0) {
+    // Guard: for upload mode we need either a bitmap or a fully decoded img.
+    // Skip the frame (and retry next tick) until the source is ready.
+    if (src === "upload" && !bitmap && srcEl && (srcEl as HTMLImageElement).naturalWidth === 0) {
+      rafRef.current = requestAnimationFrame(loop);
+      return;
+    }
+    // Also skip if upload mode but nothing is available yet at all.
+    if (src === "upload" && !bitmap && !srcEl) {
       rafRef.current = requestAnimationFrame(loop);
       return;
     }
 
-    if (srcEl) {
+    if (bitmap) {
+      // EXIF-corrected upload — draw directly from the ImageBitmap.
+      try {
+        ctx.drawImage(bitmap, 0, 0, w, h);
+      } catch (drawErr: any) {
+        console.warn("[NURA] bitmap drawImage error:", drawErr?.name, drawErr?.message);
+      }
+    } else if (srcEl) {
       try {
         if (src === "camera") {
           ctx.save();
@@ -786,20 +824,16 @@ function TryOnClient() {
           ctx.drawImage(srcEl as HTMLVideoElement, 0, 0, w, h);
           ctx.restore();
         } else {
+          // Fallback for uploads on browsers where createImageBitmap isn't
+          // available — modern browsers also apply EXIF via drawImage(<img>).
           ctx.drawImage(srcEl as HTMLImageElement, 0, 0, w, h);
         }
       } catch (drawErr: any) {
-        // drawImage can throw for two reasons:
-        //   1. Video not yet playing (camera) — skip frame and retry next tick.
-        //   2. SecurityError from crossOrigin-tainted canvas (upload) — log but
-        //      do NOT return early; FaceMesh still gets whatever is on canvas.
         console.warn("[NURA] drawImage error:", drawErr?.name, drawErr?.message);
         if (src === "camera") {
           rafRef.current = requestAnimationFrame(loop);
           return;
         }
-        // For upload: fall through to send() even if draw failed — a blank
-        // frame is better than zero detections because send() never fires.
       }
     }
 
@@ -831,6 +865,7 @@ function TryOnClient() {
     // Hysteresis-gated faceDetected state transitions (no per-frame setState).
     if (lm) {
       noFaceFramesRef.current = 0;
+      noDetectUploadFrames.current = 0;
       if (!faceDetectedRef.current) {
         faceDetectedRef.current = true;
         setFaceDetected(true);
@@ -849,6 +884,25 @@ function TryOnClient() {
       ) {
         faceDetectedRef.current = false;
         setFaceDetected(false);
+      }
+
+      // ── Static-image tracker-lock reset ──────────────────────────────────
+      // MediaPipe FaceMesh is designed for video: after it misses a face on
+      // frame 1 of a static upload its tracker is never initialised, so ALL
+      // subsequent sends also return empty — even with the same image sitting
+      // there. Fix: after ~2 s (120 frames) of zero detections on an upload,
+      // destroy and recreate the FaceMesh instance so the next send triggers a
+      // full fresh detection pass instead of a tracking-only pass.
+      if (sourceRef.current === "upload" && uploadBitmapRef.current) {
+        noDetectUploadFrames.current++;
+        if (noDetectUploadFrames.current >= 120 && faceMeshRef.current) {
+          try { faceMeshRef.current.close?.(); } catch {}
+          faceMeshRef.current = null;
+          noDetectUploadFrames.current = 0;
+          // ensureModels recreates the instance; the next loop iteration will
+          // call send() once faceMeshRef.current is populated again.
+          void ensureModelsRef.current();
+        }
       }
     }
 
@@ -931,6 +985,7 @@ function TryOnClient() {
     latestLandmarks.current = null;
     smoothedLandmarks.current = null;
     noFaceFramesRef.current = 0;
+    noDetectUploadFrames.current = 0;
     faceDetectedRef.current = false;
     setFaceDetected(false);
     detectedToneRef.current = null;
@@ -1095,8 +1150,13 @@ function TryOnClient() {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
+    if (uploadBitmapRef.current) {
+      uploadBitmapRef.current.close();
+      uploadBitmapRef.current = null;
+    }
     latestLandmarks.current = null;
     smoothedLandmarks.current = null;
+    noDetectUploadFrames.current = 0;
     setFaceDetected(false);
     faceDetectedRef.current = false;
     setFlowStage("idle");
@@ -1104,6 +1164,60 @@ function TryOnClient() {
     setRecommendations([]);
     setUploadError(null);
   }
+
+  // Shared pipeline used by BOTH the file picker and the in-app camera
+  // capture modal. Takes any image-bearing Blob (incl. File), runs it
+  // through the EXIF-corrected bitmap path, and resets detection state so
+  // the auto-scan can fire for the new face.
+  const acceptBlob = useCallback(
+    (blob: Blob) => {
+      if (!ACCEPTED_UPLOAD_TYPES.includes(blob.type) && !blob.type.startsWith("image/")) {
+        setUploadError("Please use a JPG, PNG, or WEBP image.");
+        return;
+      }
+      if (blob.size > MAX_UPLOAD_BYTES) {
+        setUploadError(`Image is too large. Please use one under ${MAX_UPLOAD_MB}MB.`);
+        return;
+      }
+
+      // Close the previous bitmap to free GPU memory.
+      if (uploadBitmapRef.current) {
+        uploadBitmapRef.current.close();
+        uploadBitmapRef.current = null;
+      }
+
+      // createImageBitmap with imageOrientation:'from-image' applies the
+      // EXIF rotation tag so MediaPipe receives an upright face regardless
+      // of how the phone was held. Falls back to null on unsupported
+      // browsers — the loop will use the <img> element instead.
+      if (typeof createImageBitmap === "function") {
+        createImageBitmap(blob, { imageOrientation: "from-image" } as ImageBitmapOptions)
+          .then((bmp) => { uploadBitmapRef.current = bmp; })
+          .catch(() => { /* fallback: loop uses imgRef */ });
+      }
+
+      const nextUrl = URL.createObjectURL(blob);
+      setPhotoUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return nextUrl;
+      });
+      if (!preserveLayersOnPhotoChange) {
+        setLayers(buildDefaultLayers());
+      }
+      latestLandmarks.current = null;
+      smoothedLandmarks.current = null;
+      faceDetectedRef.current = false;
+      noDetectUploadFrames.current = 0;
+      scanTriggeredRef.current = false;
+      setFaceDetected(false);
+      setFlowStage("idle");
+      setProfile(null);
+      setRecommendations([]);
+      setUploadError(null);
+      setSource("upload");
+    },
+    [preserveLayersOnPhotoChange]
+  );
 
   function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
@@ -1113,29 +1227,13 @@ function TryOnClient() {
       if (e.target) e.target.value = "";
       return;
     }
-    if (f.size > MAX_UPLOAD_BYTES) {
-      setUploadError(`Image is too large. Please upload a file under ${MAX_UPLOAD_MB}MB.`);
-      if (e.target) e.target.value = "";
-      return;
-    }
-    const nextUrl = URL.createObjectURL(f);
-    setPhotoUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return nextUrl;
-    });
-    if (!preserveLayersOnPhotoChange) {
-      setLayers(buildDefaultLayers());
-    }
-    latestLandmarks.current = null;
-    smoothedLandmarks.current = null;
-    faceDetectedRef.current = false;
-    setFaceDetected(false);
-    setFlowStage("idle");
-    setProfile(null);
-    setRecommendations([]);
-    setUploadError(null);
-    setSource("upload");
+    acceptBlob(f);
     if (e.target) e.target.value = "";
+  }
+
+  function onCaptureFromCamera(blob: Blob) {
+    // The capture modal hands us a JPEG blob already.
+    acceptBlob(blob);
   }
 
   function onAddToCart() {
@@ -1329,10 +1427,15 @@ function TryOnClient() {
                   </svg>
                 </div>
                 <p className="tryon-placeholder-title">Try on makeup instantly</p>
-                <p className="tryon-placeholder-sub">Upload a clear front-facing photo to see any shade on your face in seconds. Your photo never leaves your device.</p>
-                <button className="btn btn-primary tryon-placeholder-cta" onClick={openFilePicker}>
-                  Upload photo
-                </button>
+                <p className="tryon-placeholder-sub">Take a quick selfie or upload a photo. Detection runs in your browser — your image never leaves your device.</p>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+                  <button className="btn btn-primary tryon-placeholder-cta" onClick={() => setCaptureOpen(true)}>
+                    Take photo now
+                  </button>
+                  <button className="btn btn-ghost tryon-placeholder-cta" onClick={openFilePicker}>
+                    Upload from device
+                  </button>
+                </div>
               </div>
             )}
             <FaceScanOverlay
@@ -1478,6 +1581,9 @@ function TryOnClient() {
             </button>
             {source === "upload" && photoUrl && (
               <>
+                <button className="btn btn-ghost tryon-action-btn" onClick={() => setCaptureOpen(true)}>
+                  Retake photo
+                </button>
                 <button className="btn btn-ghost tryon-action-btn" onClick={openFilePicker}>
                   Change photo
                 </button>
@@ -1561,6 +1667,23 @@ function TryOnClient() {
                 </svg>
                 Upload
               </button>
+              <button
+                type="button"
+                onClick={() => setCaptureOpen(true)}
+                aria-label="Take a photo using your camera"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path
+                    d="M9 5.5 7.5 7.5H4a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 19.5h16a1.5 1.5 0 0 0 1.5-1.5V9A1.5 1.5 0 0 0 20 7.5h-3.5L15 5.5h-6Z"
+                    fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"
+                  />
+                  <circle
+                    cx="12" cy="13.5" r="3.25"
+                    fill="none" stroke="currentColor" strokeWidth="1.6"
+                  />
+                </svg>
+                Take photo
+              </button>
               {/* CAMERA_BUTTON_START: Re-enable when ENABLE_LIVE_CAMERA is true. */}
               {/*
               <button
@@ -1589,18 +1712,16 @@ function TryOnClient() {
               />
             </div>
             <div className="tryon-upload-controls">
-              <button type="button" className="btn btn-primary" onClick={openFilePicker}>
+              <button type="button" className="btn btn-primary" onClick={() => setCaptureOpen(true)}>
+                {photoUrl ? "Take another" : "Take photo"}
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={openFilePicker}>
                 {photoUrl ? "Upload another" : "Upload photo"}
               </button>
               {photoUrl && (
-                <>
-                  <button type="button" className="btn btn-ghost" onClick={openFilePicker}>
-                    Change photo
-                  </button>
-                  <button type="button" className="btn btn-ghost" onClick={clearUploadedPhoto}>
-                    Remove photo
-                  </button>
-                </>
+                <button type="button" className="btn btn-ghost" onClick={clearUploadedPhoto}>
+                  Remove photo
+                </button>
               )}
             </div>
             <label className="tryon-upload-behavior">
@@ -1951,6 +2072,17 @@ function TryOnClient() {
           </p>
         </ControlsPanel>
       </div>
+
+      {/* On-spot camera capture — opens an overlay with live preview, captures
+          a single still, then hands the blob to acceptBlob() which runs it
+          through the same EXIF-corrected pipeline as a file upload. The
+          camera stream is stopped and released on close — no media leaves
+          the device. */}
+      <CapturePhotoModal
+        open={captureOpen}
+        onClose={() => setCaptureOpen(false)}
+        onCapture={onCaptureFromCamera}
+      />
     </div>
   );
 }

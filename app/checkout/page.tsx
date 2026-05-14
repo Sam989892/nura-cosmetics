@@ -32,6 +32,11 @@ export default function CheckoutPage() {
     postcode: "",
     delivery: "standard" as Delivery,
   });
+  // UK GDPR — explicit consent capture. Terms is required; marketing/analytics
+  // are opt-in (separate lawful basis per ICO).
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [marketingOptIn, setMarketingOptIn] = useState(false);
+  const [analyticsOptIn, setAnalyticsOptIn] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +80,14 @@ export default function CheckoutPage() {
             postcode: form.postcode,
           },
           delivery: form.delivery,
+          consent: {
+            // Mirror the on-disk PRIVACY_VERSION (lib/privacy.ts). Bump
+            // both together when the notice changes.
+            privacyVersion: "2026-05-14.v1",
+            termsAccepted,
+            marketingOptIn,
+            analyticsOptIn,
+          },
         }),
       });
 
@@ -288,6 +301,59 @@ export default function CheckoutPage() {
             <code>stripe.checkout.sessions.create</code> to go live.
           </div>
 
+          {/* UK GDPR consent block — must be ticked before placing the order. */}
+          <fieldset
+            style={{
+              border: "1px solid var(--nura-line)",
+              padding: 14,
+              borderRadius: "var(--radius-sm)",
+              margin: "8px 0 16px 0",
+              fontSize: "0.88rem",
+              lineHeight: 1.4,
+            }}
+          >
+            <legend style={{ padding: "0 6px", fontWeight: 600 }}>
+              Your data
+            </legend>
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                checked={termsAccepted}
+                onChange={(e) => setTermsAccepted(e.target.checked)}
+                required
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                I&apos;ve read and accept the{" "}
+                <Link href="/privacy" target="_blank">privacy notice</Link>{" "}
+                and the terms of sale. <span style={{ color: "#b94a3e" }}>*</span>
+              </span>
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                checked={marketingOptIn}
+                onChange={(e) => setMarketingOptIn(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                Email me about new shade drops, Eid edits and restocks.
+                Unsubscribe any time.
+              </span>
+            </label>
+            <label style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <input
+                type="checkbox"
+                checked={analyticsOptIn}
+                onChange={(e) => setAnalyticsOptIn(e.target.checked)}
+                style={{ marginTop: 3 }}
+              />
+              <span>
+                Allow anonymous analytics so we can improve the site.
+              </span>
+            </label>
+          </fieldset>
+
           {error && (
             <div
               role="alert"
@@ -309,7 +375,7 @@ export default function CheckoutPage() {
             type="submit"
             className="btn btn-primary"
             style={{ width: "100%" }}
-            disabled={submitting}
+            disabled={submitting || !termsAccepted}
           >
             {submitting
               ? "Placing order…"

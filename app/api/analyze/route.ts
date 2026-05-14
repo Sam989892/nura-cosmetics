@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { products } from "@/data/products";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { NO_STORE_HEADERS } from "@/lib/privacy";
+
+// Body size cap — landmarks are ~12 KB JSON.  We hard-reject anything over
+// 32 KB to defend against accidental upload of the raw image.
+const MAX_BODY_BYTES = 32 * 1024;
+
+// Per-IP rate limit. 30 analyses per minute is comfortably more than a real
+// user could trigger but enough to stop automated abuse.
+const ANALYZE_LIMIT = { capacity: 30, refillPerSec: 0.5 };
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -196,11 +206,40 @@ function buildRecommendations(
 // ──────────────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  // ── Rate limit ───────────────────────────────────────────────────────────
+  const ip = getClientIp(req);
+  const rl = checkRateLimit(ip, "analyze", ANALYZE_LIMIT);
+  if (!rl.ok) {
+    return NextResponse.json(
+      { error: "Too many requests. Please wait a moment." },
+      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } }
+    );
+  }
+
+  // ── Body size cap ────────────────────────────────────────────────────────
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (contentLength > MAX_BODY_BYTES) {
+    return NextResponse.json(
+      { error: "Payload too large." },
+      { status: 413, headers: NO_STORE_HEADERS }
+    );
+  }
+
   let body: AnalyzeRequest;
   try {
-    body = await req.json();
+    const text = await req.text();
+    if (text.length > MAX_BODY_BYTES) {
+      return NextResponse.json(
+        { error: "Payload too large." },
+        { status: 413, headers: NO_STORE_HEADERS }
+      );
+    }
+    body = JSON.parse(text);
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON body" },
+      { status: 400, headers: NO_STORE_HEADERS }
+    );
   }
 
   const { skinSample, landmarks } = body;
@@ -213,10 +252,14 @@ export async function POST(req: NextRequest) {
   ) {
     return NextResponse.json(
       { error: "Required: skinSample {r,g,b} and landmarks[468]" },
-      { status: 400 }
+      { status: 400, headers: NO_STORE_HEADERS }
     );
   }
 
+  // Privacy: landmarks could in theory be considered biometric (UK GDPR
+  // Art.9). We use them only transiently to derive non-biometric outputs
+  // (skin tone band, undertone, face shape label) and DO NOT log, persist,
+  // or echo them back. The response contains zero biometric data.
   const { r, g, b } = skinSample;
 
   const toneCategory = classifySkinTone(r, g, b);
@@ -237,8 +280,13 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json(response, {
     headers: {
-      "Cache-Control": "no-store",
-      "Content-Type":  "application/json",
+      ...NO_STORE_HEADERS,
+      "Content-Type": "application/json",
+      // Defence-in-depth — these explicitly disable referrer / framing /
+      // sniffing for the analysis response.
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
     },
   });
 }
